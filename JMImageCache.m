@@ -8,6 +8,9 @@
 
 #import "JMImageCache.h"
 
+#import "CSAPIClient.h"
+#import "CSHTTPRequestOperation.h"
+
 static NSString *_JMImageCacheDirectory;
 
 static inline NSString *JMImageCacheDirectory() {
@@ -67,27 +70,46 @@ JMImageCache *_sharedCache = nil;
         key = keyForURL(url);
     }
 
-    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
-        NSData *data = [NSData dataWithContentsOfURL:url];
-        UIImage *i = [[UIImage alloc] initWithData:data];
+    NSMutableURLRequest *request = [[NSMutableURLRequest alloc] initWithURL:url];
+    [[CSAPIClient sharedAPIClient] setDefaultHTTPHeaderToRequest:request];
+    CSHTTPRequestOperation *requestOperation = [[CSHTTPRequestOperation alloc] initWithRequest:request];
+    requestOperation.successBlock = ^(NSHTTPURLResponse *response, id responseObject)
+    {
+        NSAssert([responseObject isKindOfClass:[NSData class]] == YES, @"Invalid kind of class.");
+        UIImage *i = [[UIImage alloc] initWithData:(NSData *)responseObject];
         // stop process if the method could not initialize the image from the specified data
-        if (!i) return;
+        if (!i)
+        {
+            CSError(@"Failed to load image (failed to create image from response data) %@", url);
+            if(completion) completion( nil );
+            return;
+        }
         
         NSString *cachePath = cachePathForKey(key);
         NSInvocation *writeInvocation = [NSInvocation invocationWithMethodSignature:[self methodSignatureForSelector:@selector(writeData:toPath:)]];
-
+        
         [writeInvocation setTarget:self];
         [writeInvocation setSelector:@selector(writeData:toPath:)];
-        [writeInvocation setArgument:&data atIndex:2];
+        [writeInvocation setArgument:&responseObject atIndex:2];
         [writeInvocation setArgument:&cachePath atIndex:3];
-
+        
         [self performDiskWriteOperation:writeInvocation];
         [self setImage:i forKey:key];
-
+        
         dispatch_async(dispatch_get_main_queue(), ^{
             if(completion) completion(i);
         });
-    });
+    };
+    requestOperation.failureBlock = ^(NSUInteger statusCode, NSError *error)
+    {
+        CSError(@"Failed to load image (load failed): %@", url);
+        if(completion) completion( nil );
+        return;
+    };
+
+    // Start the loading
+    NSOperationQueue *networkQueue = [NSOperationQueue networkQueue];
+    [networkQueue addOperation:requestOperation];
 }
 
 - (void) removeAllObjects {
